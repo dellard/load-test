@@ -1,0 +1,181 @@
+# This material is funded in part by a grant from the United States
+# Department of State. The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of the United States Department of State.
+#
+# Copyright 2016 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you
+# may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied. See the License for the specific language governing
+# permissions and limitations under the License.
+
+NOTE: the functionality of pcap_weave is also implemented by mergecap,
+and the functionality of find_rate.sh is also provided by capinfos.
+The mergcap and capinfos utilities are part of the Wireshark package,
+and if I'd known about them then I probably wouldn't have written
+pcap_weave and find_rate.sh.
+
+OVERVIEW:
+
+The pcap_weave and pcap_shift programs are intended to be used in
+conjunction with the utilities provided by tcpreplay in order to
+create extra PCAP files that can be used to simulate different loads.
+(Some or all of the functionality of pcap_weave and pcap_shift may
+already exist in the tcpreplay utilities, but if so, I couldn't figure
+out how to access them.)
+
+pcap_shift "shifts" all of the timestamps in a PCAP file so that the
+timestamp of the first packet has a given value, and all of the
+subsequent packets have timestamps that have the same relative offset
+in the PCAP file as they did in the input.
+
+pcap_weave combines multiple input PCAP files into a single output
+PCAP file, sorted by timestamp.
+
+pcap_addr replaces the addresses and ports in a trace, according to
+fixed rules, in order to make it look like the packets are from
+different flows.
+
+find_rate.sh is a utility that reads a PCAP file, and prints some info
+about it, including the average bitrate of the PCAP file.
+
+Note that both pcap_shift and pcap_weave may both fail and destroy
+their input if the output overwrites it.  There is no safeguard
+against this right now.
+
+1. A simple example:
+
+    For example, if you have a file RAW.pcap that contains a trace for
+    a single connection, and you want to create a workload that has
+    three connections, starting at times 0.0, 0.1, and 0.2 (in
+    seconds), you could do that with a sequence of commands like the
+    following:
+
+    # Create time-shifted copies of RAW.pcap:
+
+    pcap_shift -b 0.0 -o T0.pcap RAW.pcap
+    pcap_shift -b 0.1 -o T1.pcap RAW.pcap
+    pcap_shift -b 0.2 -o T2.pcap RAW.pcap
+
+    # Weave the time-shifted copies into a single PCAP named
+    # "OUT.pcap":
+
+    pcap_weave -o OUT.pcap T0.pcap T1.pcap T2.pcap
+
+2. A more complicated example:
+
+    In the previous example, the packets were literally copied, which
+    means that if there was a server receiving the packets, that
+    server would either be confused, or simply drop the later packets
+    as duplicates.  If we really want to simulate three separate
+    connections, then we'll need to change the ephemeral port used on
+    each connection.  This can be done with tcprewrite.
+
+    Assume that the ephemeral port used by the connection is EPHEM.
+    (there is not a convenient tool for extracting ephemeral port info
+    yet, but I'll probably write one.)  We'll create three copies of
+    the trace, and rewrite the last two to use EPHEM1 and EPHEM2.
+
+    # Begin as before, by creating time-shifted copies of RAW.pcap:
+
+    pcap_shift -b 0.0 -o T0.pcap RAW.pcap
+    pcap_shift -b 0.1 -o T1.pcap RAW.pcap
+    pcap_shift -b 0.2 -o T2.pcap RAW.pcap
+
+    # Then use tcprewrite to rewrite the ephemeral ports:
+
+    tcprewrite --portmap EPHEM:EPHEM1 -i T1.pcap -o T1-e.pcap
+    tcprewrite --portmap EPHEM:EPHEM2 -i T2.pcap -o T2-e.pcap
+
+    # And weave the results together:
+
+    pcap_weave -o OUT.pcap T0.pcap T1-e.pcap T2-e.pcap
+
+3. Changing addresses
+
+    The flows we created in the first two examples may look strange to
+    an observer because the only change we made to the packets was
+    their timestamps.  If we want to make the packets look like they
+    are from different TCP flows, we can do that with pcap_addr.
+
+    For example, to change all the packets in in.pcap from a flow
+    between 10.0.0.10 and 10.0.20.11, originating from 10.0.0.10 and
+    with a destination port of 443, to be from 1.2.3.4 to 5.6.7.8 and
+    use use a new ephemeral port, we could use:
+
+    pcap_addr -i in.pcap -o out.pcap \
+	    10.0.0.10:10.0.20.11:0:443/1.2.3.4:5.6.7.8:0:443
+
+    The order of the addresses and ports corresponds to the source
+    address, destination address, source port, and destination port on
+    the first observed packet for the flow.
+
+    As a special case, if the source port (aka the ephemeral port) on
+    the left side of the rewrite rule is given a value of zero, then
+    it matches all source ports.  If the source port on the right side
+    of the rewrite rule is zero, then a new ephemeral port is chosen
+    for each new matching flow.  These two cases are typically used in
+    conjunction to rewrite all of the flows of a given protocol, as
+    given in the previous example:  all of the flows connecting to the
+    "HTTPS port" (443) will be given new ephemeral ports.  The
+    ephemeral ports are allocated in ascending order, starting at
+    49152 (and wrapping, if necessary).  The first port allocated can
+    be specified using the -e commandline option.
+
+    Note that every time an ephemeral port appears in the input, it will be
+    rewritten to the same (potentially different) port in the output, so
+    pcap_addr cannot be used to make many copies of the same flow look like
+    different flows.
+
+4. Putting the pieces together.
+
+    Imagine that we have a trace (orig.pcap) of a single client (with
+    address X) making 100 connections to a single web server (with
+    address Y), using HTTPS (destination port 443), and we want to use
+    this to create a trace that mimics several clients (with addresses
+    X0..XN) each making the same 100 connections to that web server,
+    at time offsets T0..TN.
+
+    # First, create each of the time-shifted copies:
+
+    pcap_shift -b $T0 -o "T0.pcap" orig.pcap
+    ...
+    pcap_shift -b $TN -o "TN.pcap" orig.pcap
+
+    # Then change the addresses/ephemeral ports for each:
+
+    pcap_addr -i "T0.pcap" -o "X0.pcap" \
+	    $X:$Y:0:443/$X0:$Y:0:443
+    ...
+    pcap_addr -i "TN.pcap" -o "XN.pcap" \
+	    $X:$Y:0:443/$XN:$Y:0:443
+
+    # And finally weave them all back together:
+
+    pcap_weave -o OUT.pcap X0.pcap ... XN.pcap
+
+5. Increasing the load from a single host
+
+    As a variation, if we wanted to simulate a greater load from the
+    single host X, we could change the calls to pcap_addr to make sure
+    that we use different sets of ephemeral ports for each set of
+    connections.
+
+    pcap_addr -i "T0.pcap" -o "X0.pcap" -e 50000 \
+	    $X:$Y:0:443/$X:$Y:0:443
+    pcap_addr -i "T1.pcap" -o "X1.pcap" -e 50100 \
+	    $X:$Y:0:443/$X:$Y:0:443
+    ...
+    etc.
+
+    Note that this requires knowing exactly how many ephemeral ports
+    are consumed by the original trace, and the tools do not automate
+    this step.

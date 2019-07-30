@@ -1,0 +1,246 @@
+#!/usr/bin/env python
+#
+# This material is funded in part by a grant from the United States
+# Department of State. The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of the United States Department of State.
+#
+# Copyright 2016 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you
+# may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied. See the License for the specific language governing
+# permissions and limitations under the License.
+
+import dpkt
+import sys
+
+from optparse import OptionParser
+
+TUPLES = dict()
+MAPPING = dict()
+MIN_EPHEM = 49152
+EPHEM_RANGE = 65536
+LAST_EPHEM = MIN_EPHEM
+
+def raw2ip(raw):
+    """
+    Probably fails if byte order isn't what we expect
+    """
+
+    return '.'.join(['%d' % ord(c) for c in raw])
+
+def ip2raw(dotted_quad):
+
+    return ''.join([chr(int(c)) for c in dotted_quad.split('.')])
+
+def allocate_ephem():
+
+    global LAST_EPHEM
+
+    # make sure we haven't wrapped or started with a bad value
+    #
+    LAST_EPHEM %= EPHEM_RANGE
+    if LAST_EPHEM < MIN_EPHEM:
+        LAST_EPHEM = MIN_EPHEM
+
+    ephem = LAST_EPHEM
+
+    LAST_EPHEM += 1
+
+    return ephem
+
+def find_new_addr(src, dst, sport, dport):
+
+    key = (src, dst, sport, dport)
+    wild_key = (src, dst, dport)
+
+    if key in MAPPING:
+        n_src, n_dst, n_sport, n_dport = MAPPING[key]
+        if n_sport == 0:
+            n_sport = allocate_ephem()
+        return n_src, n_dst, n_sport, n_dport
+    elif wild_key in MAPPING:
+        n_src, n_dst, n_sport, n_dport = MAPPING[wild_key]
+        if n_sport == 0:
+            n_sport = allocate_ephem()
+        return n_src, n_dst, n_sport, n_dport
+    else:
+        # print 'no mapping defined'
+        return src, dst, sport, dport
+
+def readdr_tcp(pkt_eth):
+
+    if not hasattr(pkt_eth, 'ip'):
+        print 'failed ip'
+        return pkt_eth
+
+    pkt_ip = pkt_eth.data
+
+    if not hasattr(pkt_ip, 'tcp'):
+        print 'failed tcp'
+        print pkt_ip.__dict__
+        return pkt_eth
+
+    pkt_tcp = pkt_ip.data
+
+    src = pkt_ip.src
+    dst = pkt_ip.dst
+    sport = pkt_tcp.sport
+    dport = pkt_tcp.dport
+
+    fwd_tuple = (src, dst, sport, dport)
+
+    if fwd_tuple not in TUPLES:
+        # to disambiguate 4-tuples, we'll assume that the first
+        # tuple we see has the ephemeral port as the source port
+
+        (new_src, new_dst, new_sport, new_dport) = find_new_addr(
+                src, dst, sport, dport)
+
+        TUPLES[fwd_tuple] = (new_src, new_dst, new_sport, new_dport)
+
+        bkw_tuple = (dst, src, dport, sport)
+        TUPLES[bkw_tuple] = (new_dst, new_src, new_dport, new_sport)
+
+    (sub_src, sub_dst, sub_sport, sub_dport) = TUPLES[fwd_tuple]
+
+    pkt_ip.src = sub_src
+    pkt_ip.dst = sub_dst
+    pkt_tcp.sport = sub_sport
+    pkt_tcp.dport = sub_dport
+
+    pkt_tcp.pack()
+    pkt_ip.pack()
+    pkt_eth.pack()
+
+    return pkt_eth
+
+def add_mapping(orig, new):
+    """
+    Add a mapping from an original address to a new address.
+
+    The format for addresses is A:B:C:D where A and B are dotted-quad
+    IPv4 addresses, and C and D are port numbers.
+
+    We don't do a lot of error checking here...
+    """
+
+    osrc_txt, odst_txt, osport_txt, odport_txt = orig.split(':')
+    nsrc_txt, ndst_txt, nsport_txt, ndport_txt = new.split(':')
+
+    osrc = ip2raw(osrc_txt)
+    odst = ip2raw(odst_txt)
+    nsrc = ip2raw(nsrc_txt)
+    ndst = ip2raw(ndst_txt)
+
+    osport = int(osport_txt)
+    odport = int(odport_txt)
+    nsport = int(nsport_txt)
+    ndport = int(ndport_txt)
+
+    # print 'adding mapping %s %s >> %s %s' % (
+    #        raw2ip(osrc), raw2ip(odst), raw2ip(nsrc), raw2ip(ndst))
+
+    # if the original source port is non-zero, then add a
+    # mapping for it.  Otherwise add a mapping for the wildcard
+    # source port, which will match any port (typically an
+    # ephemeral port)
+    #
+    if osport:
+        MAPPING[(osrc, odst, osport, odport)] = (nsrc, ndst, nsport, ndport)
+    else:
+        MAPPING[(osrc, odst, odport)] = (nsrc, ndst, nsport, ndport)
+
+def parse_args(argv):
+
+    parser = OptionParser()
+
+    parser.add_option('-e', dest='ephemeral_port',
+            metavar='PORT', default=MIN_EPHEM,
+            type=int,
+            help='First ephemeral port to use [default=%default]')
+
+    parser.add_option('-i', dest='in_fname',
+            metavar='FILENAME', default='in.pcap',
+            help='Input file name [default=%default]')
+
+    parser.add_option('-o', dest='out_fname',
+            metavar='FILENAME', default='out.pcap',
+            help='Output file name [default=%default]')
+
+    options, args = parser.parse_args(argv)
+
+    rewrites = args[1:]
+
+    if not rewrites:
+        print 'ERROR: no addresses to rewrite?'
+        sys.exit(1)
+
+    for rewrite in rewrites:
+        orig_tuple, new_tuple = rewrite.split('/')
+
+        try:
+            add_mapping(orig_tuple, new_tuple)
+        except BaseException, exc:
+            print 'bad mapping: %s' % rewrite
+            return None
+
+    if ((options.ephemeral_port < MIN_EPHEM) or
+            (options.ephemeral_port >= EPHEM_RANGE)):
+        print 'ERROR: ephemeral port [%d] out of range' % options.ephemeral_port
+        sys.exit(1)
+    else:
+        global LAST_EPHEM
+
+        LAST_EPHEM = options.ephemeral_port
+
+    return options
+
+def process(in_file, out_file):
+
+    pcap_fin = dpkt.pcap.Reader(in_file)
+    pcap_fout = dpkt.pcap.Writer(out_file)
+
+    for timestamp, packet in pcap_fin:
+        pkt_eth = dpkt.ethernet.Ethernet(packet)
+
+        new_pkt = readdr_tcp(pkt_eth)
+
+        pcap_fout.writepkt(new_pkt, ts=timestamp)
+
+def main(argv):
+
+    options = parse_args(argv)
+    if not options:
+        return 1
+
+    # add_mapping('10.0.2.15:10.0.2.2:54829:22', '1.2.3.4:5.6.7.8:4000:5000')
+
+    try:
+        fin = open(options.in_fname)
+    except BaseException, exc:
+        print 'ERROR: %s' % str(exc)
+        return 1
+
+    try:
+        fout = open(options.out_fname, 'w+')
+    except BaseException, exc:
+        print 'ERROR: %s' % str(exc)
+        return 1
+
+    process(fin, fout)
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))
+

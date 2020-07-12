@@ -19,16 +19,22 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-import dpkt
+"""
+Utility to rewrite IP packet four-tuples (or two-tuples, for ICMP)
+"""
+
 import sys
 
 from optparse import OptionParser
+
+import dpkt
 
 TUPLES = dict()
 MAPPING = dict()
 MIN_EPHEM = 49152
 EPHEM_RANGE = 65536
 LAST_EPHEM = MIN_EPHEM
+
 
 def raw2ip(raw):
     """
@@ -37,12 +43,14 @@ def raw2ip(raw):
 
     return '.'.join(['%d' % ord(c) for c in raw])
 
+
 def ip2raw(dotted_quad):
     """
     Convert a dotted quad string into a 4-byte byte array
     """
 
     return bytes([int(c) for c in dotted_quad.split('.')])
+
 
 def allocate_ephem():
     """
@@ -62,6 +70,7 @@ def allocate_ephem():
     LAST_EPHEM += 1
 
     return ephem
+
 
 def find_new_addr(src, dst, sport, dport):
     """
@@ -95,6 +104,7 @@ def find_new_addr(src, dst, sport, dport):
 
     # print('no mapping defined')
     return src, dst, sport, dport
+
 
 def readdr_tcp(pkt_eth):
     """
@@ -160,6 +170,7 @@ def readdr_tcp(pkt_eth):
 
     return pkt_eth
 
+
 def add_mapping(orig, new):
     """
     Add a mapping from an original address to a new address.
@@ -201,6 +212,7 @@ def add_mapping(orig, new):
     # Add a mapping for just the addresses, for ICMP
     #
     MAPPING[(osrc, odst)] = (nsrc, ndst, -1, -1)
+
 
 def parse_args(argv):
     """
@@ -251,6 +263,7 @@ def parse_args(argv):
 
     return options
 
+
 def process(in_file, out_file):
     """
     Process a single input stream, writing the results
@@ -266,6 +279,7 @@ def process(in_file, out_file):
         new_pkt = readdr_tcp(pkt_eth)
 
         pcap_fout.writepkt(new_pkt, ts=timestamp)
+
 
 def main(argv):
     """

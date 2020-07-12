@@ -38,10 +38,16 @@ def raw2ip(raw):
     return '.'.join(['%d' % ord(c) for c in raw])
 
 def ip2raw(dotted_quad):
+    """
+    Convert a dotted quad string into a 4-byte byte array
+    """
 
     return bytes([int(c) for c in dotted_quad.split('.')])
 
 def allocate_ephem():
+    """
+    Allocate an unused ephemeral port
+    """
 
     global LAST_EPHEM
 
@@ -58,6 +64,14 @@ def allocate_ephem():
     return ephem
 
 def find_new_addr(src, dst, sport, dport):
+    """
+    Find the new "address" four-tuple for a
+    src/dst/sport/dport four-tuple
+
+    If there's no mapping for the given
+    four-tuple (possibly wildcarded) then
+    return the original
+    """
 
     global MAPPING
 
@@ -83,6 +97,10 @@ def find_new_addr(src, dst, sport, dport):
     return src, dst, sport, dport
 
 def readdr_tcp(pkt_eth):
+    """
+    Replace the IP four-tuple of an Ethernet
+    packet, if requested.
+    """
 
     if not hasattr(pkt_eth, 'ip'):
         print('failed ip')
@@ -185,6 +203,9 @@ def add_mapping(orig, new):
     MAPPING[(osrc, odst)] = (nsrc, ndst, -1, -1)
 
 def parse_args(argv):
+    """
+    Parse the commandline
+    """
 
     parser = OptionParser()
 
@@ -231,6 +252,10 @@ def parse_args(argv):
     return options
 
 def process(in_file, out_file):
+    """
+    Process a single input stream, writing the results
+    to the output stream.
+    """
 
     pcap_fin = dpkt.pcap.Reader(in_file)
     pcap_fout = dpkt.pcap.Writer(out_file)
@@ -243,6 +268,9 @@ def process(in_file, out_file):
         pcap_fout.writepkt(new_pkt, ts=timestamp)
 
 def main(argv):
+    """
+    Main of pcap_addr
+    """
 
     options = parse_args(argv)
     if not options:

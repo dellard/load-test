@@ -107,7 +107,7 @@ class PcapAddrRewriter(object):
         # print('no mapping defined')
         return src, dst, sport, dport
 
-    def readdr_tcp(self, pkt_eth):
+    def rewrite_pkt(self, pkt_eth):
         """
         Replace the IP four-tuple of an Ethernet
         packet, if requested.
@@ -225,7 +225,7 @@ class PcapAddrRewriter(object):
         for timestamp, packet in pcap_fin:
             pkt_eth = dpkt.ethernet.Ethernet(packet)
 
-            new_pkt = self.readdr_tcp(pkt_eth)
+            new_pkt = self.rewrite_pkt(pkt_eth)
 
             pcap_fout.writepkt(new_pkt, ts=timestamp)
 

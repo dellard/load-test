@@ -62,7 +62,11 @@ def find_new_addr(src, dst, sport, dport):
     key = (src, dst, sport, dport)
     wild_key = (src, dst, dport)
 
-    if key in MAPPING:
+    if sport == -1 and dport == -1:
+        addr_key = (src, dst)
+        if addr_key in MAPPING:
+            return MAPPING[addr_key]
+    elif key in MAPPING:
         n_src, n_dst, n_sport, n_dport = MAPPING[key]
         if n_sport == 0:
             n_sport = allocate_ephem()
@@ -72,9 +76,9 @@ def find_new_addr(src, dst, sport, dport):
         if n_sport == 0:
             n_sport = allocate_ephem()
         return n_src, n_dst, n_sport, n_dport
-    else:
-        # print 'no mapping defined'
-        return src, dst, sport, dport
+
+    # print 'no mapping defined'
+    return src, dst, sport, dport
 
 def readdr_tcp(pkt_eth):
 
@@ -84,17 +88,26 @@ def readdr_tcp(pkt_eth):
 
     pkt_ip = pkt_eth.data
 
-    if not hasattr(pkt_ip, 'tcp'):
-        print 'failed tcp'
-        print pkt_ip.__dict__
+    if hasattr(pkt_ip, 'tcp'):
+        has_ports = True
+    elif hasattr(pkt_ip, 'udp'):
+        has_ports = True
+    elif hasattr(pkt_ip, 'icmp'):
+        has_ports = False
+    else:
+        # We don't know what to do with it
         return pkt_eth
 
-    pkt_tcp = pkt_ip.data
-
+    pkt_body = pkt_ip.data
     src = pkt_ip.src
     dst = pkt_ip.dst
-    sport = pkt_tcp.sport
-    dport = pkt_tcp.dport
+
+    if has_ports:
+        sport = pkt_body.sport
+        dport = pkt_body.dport
+    else:
+        sport = -1
+        dport = -1
 
     fwd_tuple = (src, dst, sport, dport)
 
@@ -114,10 +127,12 @@ def readdr_tcp(pkt_eth):
 
     pkt_ip.src = sub_src
     pkt_ip.dst = sub_dst
-    pkt_tcp.sport = sub_sport
-    pkt_tcp.dport = sub_dport
 
-    pkt_tcp.pack()
+    if has_ports:
+        pkt_body.sport = sub_sport
+        pkt_body.dport = sub_dport
+
+    pkt_body.pack()
     pkt_ip.pack()
     pkt_eth.pack()
 
@@ -158,6 +173,10 @@ def add_mapping(orig, new):
         MAPPING[(osrc, odst, osport, odport)] = (nsrc, ndst, nsport, ndport)
     else:
         MAPPING[(osrc, odst, odport)] = (nsrc, ndst, nsport, ndport)
+
+    # Add a mapping for just the addresses, for ICMP
+    #
+    MAPPING[(osrc, odst)] = (nsrc, ndst, -1, -1)
 
 def parse_args(argv):
 

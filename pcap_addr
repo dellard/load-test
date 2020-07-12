@@ -76,9 +76,9 @@ def find_new_addr(src, dst, sport, dport):
         if n_sport == 0:
             n_sport = allocate_ephem()
         return n_src, n_dst, n_sport, n_dport
-    else:
-        # print 'no mapping defined'
-        return src, dst, sport, dport
+
+    # print 'no mapping defined'
+    return src, dst, sport, dport
 
 def readdr_tcp(pkt_eth):
 

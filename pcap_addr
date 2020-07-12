@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # This material is funded in part by a grant from the United States
 # Department of State. The opinions, findings, and conclusions stated
@@ -39,7 +39,7 @@ def raw2ip(raw):
 
 def ip2raw(dotted_quad):
 
-    return ''.join([chr(int(c)) for c in dotted_quad.split('.')])
+    return bytes([int(c) for c in dotted_quad.split('.')])
 
 def allocate_ephem():
 
@@ -59,6 +59,8 @@ def allocate_ephem():
 
 def find_new_addr(src, dst, sport, dport):
 
+    global MAPPING
+
     key = (src, dst, sport, dport)
     wild_key = (src, dst, dport)
 
@@ -77,13 +79,13 @@ def find_new_addr(src, dst, sport, dport):
             n_sport = allocate_ephem()
         return n_src, n_dst, n_sport, n_dport
 
-    # print 'no mapping defined'
+    # print('no mapping defined')
     return src, dst, sport, dport
 
 def readdr_tcp(pkt_eth):
 
     if not hasattr(pkt_eth, 'ip'):
-        print 'failed ip'
+        print('failed ip')
         return pkt_eth
 
     pkt_ip = pkt_eth.data
@@ -110,6 +112,8 @@ def readdr_tcp(pkt_eth):
         dport = -1
 
     fwd_tuple = (src, dst, sport, dport)
+
+    global TUPLES
 
     if fwd_tuple not in TUPLES:
         # to disambiguate 4-tuples, we'll assume that the first
@@ -148,8 +152,10 @@ def add_mapping(orig, new):
     We don't do a lot of error checking here...
     """
 
-    osrc_txt, odst_txt, osport_txt, odport_txt = orig.split(':')
-    nsrc_txt, ndst_txt, nsport_txt, ndport_txt = new.split(':')
+    global MAPPING
+
+    osrc_txt, odst_txt, osport_txt, odport_txt = orig.split(r':')
+    nsrc_txt, ndst_txt, nsport_txt, ndport_txt = new.split(r':')
 
     osrc = ip2raw(osrc_txt)
     odst = ip2raw(odst_txt)
@@ -161,8 +167,8 @@ def add_mapping(orig, new):
     nsport = int(nsport_txt)
     ndport = int(ndport_txt)
 
-    # print 'adding mapping %s %s >> %s %s' % (
-    #        raw2ip(osrc), raw2ip(odst), raw2ip(nsrc), raw2ip(ndst))
+    # print( 'adding mapping %s %s >> %s %s' % (
+    #        raw2ip(osrc), raw2ip(odst), raw2ip(nsrc), raw2ip(ndst)))
 
     # if the original source port is non-zero, then add a
     # mapping for it.  Otherwise add a mapping for the wildcard
@@ -200,7 +206,7 @@ def parse_args(argv):
     rewrites = args[1:]
 
     if not rewrites:
-        print 'ERROR: no addresses to rewrite?'
+        print('ERROR: no addresses to rewrite?')
         sys.exit(1)
 
     for rewrite in rewrites:
@@ -208,13 +214,14 @@ def parse_args(argv):
 
         try:
             add_mapping(orig_tuple, new_tuple)
-        except BaseException, exc:
-            print 'bad mapping: %s' % rewrite
+        except BaseException as exc:
+            print('bad mapping: %s' % rewrite)
+            print('exc %s' % str(exc))
             return None
 
     if ((options.ephemeral_port < MIN_EPHEM) or
             (options.ephemeral_port >= EPHEM_RANGE)):
-        print 'ERROR: ephemeral port [%d] out of range' % options.ephemeral_port
+        print('ERROR: ephemeral port [%d] out of range' % options.ephemeral_port)
         sys.exit(1)
     else:
         global LAST_EPHEM
@@ -244,15 +251,15 @@ def main(argv):
     # add_mapping('10.0.2.15:10.0.2.2:54829:22', '1.2.3.4:5.6.7.8:4000:5000')
 
     try:
-        fin = open(options.in_fname)
-    except BaseException, exc:
-        print 'ERROR: %s' % str(exc)
+        fin = open(options.in_fname, 'rb')
+    except BaseException as exc:
+        print('ERROR: %s' % str(exc))
         return 1
 
     try:
-        fout = open(options.out_fname, 'w+')
-    except BaseException, exc:
-        print 'ERROR: %s' % str(exc)
+        fout = open(options.out_fname, 'wb+')
+    except BaseException as exc:
+        print('ERROR: %s' % str(exc))
         return 1
 
     process(fin, fout)

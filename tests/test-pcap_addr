@@ -1,0 +1,89 @@
+#!/bin/sh
+
+TEMPDIR=./out
+
+mkdir -p "${TEMPDIR}" > /dev/null
+if [ ! -d "${TEMPDIR}" ]; then
+    echo "TEMPDIR $TEMPDIR cannot be created"
+    exit 1
+fi
+
+test_icmp() {
+
+    TEST=icmp
+    mkdir -p ../out/ > /dev/null
+    rm -f "${TEMPDIR}"/test_icmp.*
+
+    local got_pcap="$TEMPDIR/test-icmp-got.pcap"
+    local got_out="$TEMPDIR/test-icmp-got.txt"
+    local exp_out="$TEMPDIR/test-icmp-exp.txt"
+
+    rm -f "$got_pcap" "$got_out" "$exp_out"
+
+    ../pcap_addr -i "../pcaps/test-icmp.pcap" -o "$got_pcap" \
+		10.0.2.15:8.8.8.8:0:0/1.2.3.4:5.6.7.8:0:0
+    if [ $? -ne 0 ]; then
+	echo "ERROR: $TEST: pcap_addr failed"
+	exit 1
+    fi
+
+    tcpdump -nr "$got_pcap" > "$got_out"
+    if [ $? -ne 0 ]; then
+	echo "ERROR: $TEST: tcpdump failed?"
+	exit 1
+    fi
+
+    tcpdump -nr "../pcaps/test-icmp-exp.pcap" > "$exp_out"
+    cmp "$exp_out" "$got_out"
+    local failed=$?
+
+    rm -f "$got_pcap" "$got_out" "$exp_out"
+
+    if [ $failed -ne 0 ]; then
+	echo "FAILED: $TEST: failed?"
+	exit 1
+    else
+	echo "PASSED: $TEST"
+    fi
+}
+
+test_tcp() {
+
+    TEST=tcp
+    mkdir -p ../out/ > /dev/null
+
+    local got_pcap="$TEMPDIR/test-tcp-got.pcap"
+    local got_out="$TEMPDIR/test-tcp-got.txt"
+    local exp_out="$TEMPDIR/test-tcp-exp.txt"
+
+    rm -f "$got_pcap" "$got_out" "$exp_out"
+
+    ../pcap_addr -i "../pcaps/test-tcp.pcap" -o "$got_pcap" \
+	    10.0.2.15:172.217.6.238:0:80/1.2.3.4:5.6.7.8:0:0
+    if [ $? -ne 0 ]; then
+	echo "ERROR: $TEST: pcap_addr failed"
+	exit 1
+    fi
+
+    tcpdump -nr "$got_pcap" > "$got_out"
+    if [ $? -ne 0 ]; then
+	echo "ERROR: $TEST: tcpdump failed?"
+	exit 1
+    fi
+
+    tcpdump -nr "../pcaps/test-tcp-exp.pcap" > "$exp_out"
+    cmp "$exp_out" "$got_out"
+    local failed=$?
+
+    rm -f "$got_pcap" "$got_out" "$exp_out"
+
+    if [ $failed -ne 0 ]; then
+	echo "FAILED: $TEST: failed?"
+	exit 1
+    else
+	echo "PASSED: $TEST"
+    fi
+}
+
+test_tcp
+test_icmp

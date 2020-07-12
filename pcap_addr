@@ -19,185 +19,237 @@
 # implied. See the License for the specific language governing
 # permissions and limitations under the License.
 
-import dpkt
+"""
+Utility to rewrite IP packet four-tuples (or two-tuples, for ICMP)
+"""
+
 import sys
 
 from optparse import OptionParser
 
-TUPLES = dict()
-MAPPING = dict()
-MIN_EPHEM = 49152
-EPHEM_RANGE = 65536
-LAST_EPHEM = MIN_EPHEM
+import dpkt
 
-def raw2ip(raw):
+
+class PcapAddrRewriter(object):
     """
-    Probably fails if byte order isn't what we expect
+    A four-tuple rewriter
     """
 
-    return '.'.join(['%d' % ord(c) for c in raw])
+    MIN_EPHEM = 49152
+    EPHEM_RANGE = 65536
 
-def ip2raw(dotted_quad):
+    def __init__(self):
+        self.known_tuples = dict()
+        self.remappings = dict()
+        self.last_ephem = self.MIN_EPHEM
 
-    return bytes([int(c) for c in dotted_quad.split('.')])
+    @staticmethod
+    def raw2ip(raw):
+        """
+        Probably fails if byte order isn't what we expect
+        """
 
-def allocate_ephem():
+        return '.'.join(['%d' % ord(c) for c in raw])
 
-    global LAST_EPHEM
+    @staticmethod
+    def ip2raw(dotted_quad):
+        """
+        Convert a dotted quad string into a 4-byte byte array
+        """
 
-    # make sure we haven't wrapped or started with a bad value
-    #
-    LAST_EPHEM %= EPHEM_RANGE
-    if LAST_EPHEM < MIN_EPHEM:
-        LAST_EPHEM = MIN_EPHEM
+        return bytes([int(c) for c in dotted_quad.split('.')])
 
-    ephem = LAST_EPHEM
+    def allocate_ephem(self):
+        """
+        Allocate an unused ephemeral port
+        """
 
-    LAST_EPHEM += 1
+        # make sure we haven't wrapped or started with a bad value
+        #
+        self.last_ephem %= self.EPHEM_RANGE
+        if self.last_ephem < self.MIN_EPHEM:
+            self.last_ephem = self.MIN_EPHEM
 
-    return ephem
+        ephem = self.last_ephem
 
-def find_new_addr(src, dst, sport, dport):
+        self.last_ephem += 1
 
-    global MAPPING
+        return ephem
 
-    key = (src, dst, sport, dport)
-    wild_key = (src, dst, dport)
+    def find_new_addr(self, src, dst, sport, dport):
+        """
+        Find the new "address" four-tuple for a
+        src/dst/sport/dport four-tuple
 
-    if sport == -1 and dport == -1:
-        addr_key = (src, dst)
-        if addr_key in MAPPING:
-            return MAPPING[addr_key]
-    elif key in MAPPING:
-        n_src, n_dst, n_sport, n_dport = MAPPING[key]
-        if n_sport == 0:
-            n_sport = allocate_ephem()
-        return n_src, n_dst, n_sport, n_dport
-    elif wild_key in MAPPING:
-        n_src, n_dst, n_sport, n_dport = MAPPING[wild_key]
-        if n_sport == 0:
-            n_sport = allocate_ephem()
-        return n_src, n_dst, n_sport, n_dport
+        If there's no mapping for the given
+        four-tuple (possibly wildcarded) then
+        return the original
+        """
 
-    # print('no mapping defined')
-    return src, dst, sport, dport
+        key = (src, dst, sport, dport)
+        wild_key = (src, dst, dport)
 
-def readdr_tcp(pkt_eth):
+        if sport == -1 and dport == -1:
+            addr_key = (src, dst)
+            if addr_key in self.remappings:
+                return self.remappings[addr_key]
+        elif key in self.remappings:
+            n_src, n_dst, n_sport, n_dport = self.remappings[key]
+            if n_sport == 0:
+                n_sport = self.allocate_ephem()
+            return n_src, n_dst, n_sport, n_dport
+        elif wild_key in self.remappings:
+            n_src, n_dst, n_sport, n_dport = self.remappings[wild_key]
+            if n_sport == 0:
+                n_sport = self.allocate_ephem()
+            return n_src, n_dst, n_sport, n_dport
 
-    if not hasattr(pkt_eth, 'ip'):
-        print('failed ip')
+        # print('no mapping defined')
+        return src, dst, sport, dport
+
+    def rewrite_pkt(self, pkt_eth):
+        """
+        Replace the IP four-tuple of an Ethernet
+        packet, if requested.
+        """
+
+        if not hasattr(pkt_eth, 'ip'):
+            print('failed ip')
+            return pkt_eth
+
+        pkt_ip = pkt_eth.data
+
+        if hasattr(pkt_ip, 'tcp'):
+            has_ports = True
+        elif hasattr(pkt_ip, 'udp'):
+            has_ports = True
+        elif hasattr(pkt_ip, 'icmp'):
+            has_ports = False
+        else:
+            # We don't know what to do with it
+            return pkt_eth
+
+        pkt_body = pkt_ip.data
+        src = pkt_ip.src
+        dst = pkt_ip.dst
+
+        if has_ports:
+            sport = pkt_body.sport
+            dport = pkt_body.dport
+        else:
+            sport = -1
+            dport = -1
+
+        fwd_tuple = (src, dst, sport, dport)
+
+        if fwd_tuple not in self.known_tuples:
+            # to disambiguate 4-tuples, we'll assume that the first
+            # tuple we see has the ephemeral port as the source port
+
+            (new_src, new_dst, new_sport, new_dport) = self.find_new_addr(
+                    src, dst, sport, dport)
+
+            self.known_tuples[fwd_tuple] = (
+                    new_src, new_dst, new_sport, new_dport)
+
+            bkw_tuple = (dst, src, dport, sport)
+            self.known_tuples[bkw_tuple] = (
+                    new_dst, new_src, new_dport, new_sport)
+
+        (sub_src, sub_dst, sub_sport, sub_dport) = self.known_tuples[fwd_tuple]
+
+        pkt_ip.src = sub_src
+        pkt_ip.dst = sub_dst
+
+        if has_ports:
+            pkt_body.sport = sub_sport
+            pkt_body.dport = sub_dport
+
+        pkt_body.pack()
+        pkt_ip.pack()
+        pkt_eth.pack()
+
         return pkt_eth
 
-    pkt_ip = pkt_eth.data
+    def add_mapping(self, orig, new):
+        """
+        Add a mapping from an original address to a new address.
 
-    if hasattr(pkt_ip, 'tcp'):
-        has_ports = True
-    elif hasattr(pkt_ip, 'udp'):
-        has_ports = True
-    elif hasattr(pkt_ip, 'icmp'):
-        has_ports = False
-    else:
-        # We don't know what to do with it
-        return pkt_eth
+        The format for addresses is A:B:C:D where A and B are dotted-quad
+        IPv4 addresses, and C and D are port numbers.
 
-    pkt_body = pkt_ip.data
-    src = pkt_ip.src
-    dst = pkt_ip.dst
+        We don't do a lot of error checking here...
+        """
 
-    if has_ports:
-        sport = pkt_body.sport
-        dport = pkt_body.dport
-    else:
-        sport = -1
-        dport = -1
+        osrc_txt, odst_txt, osport_txt, odport_txt = orig.split(r':')
+        nsrc_txt, ndst_txt, nsport_txt, ndport_txt = new.split(r':')
 
-    fwd_tuple = (src, dst, sport, dport)
+        osrc = self.ip2raw(osrc_txt)
+        odst = self.ip2raw(odst_txt)
+        nsrc = self.ip2raw(nsrc_txt)
+        ndst = self.ip2raw(ndst_txt)
 
-    global TUPLES
+        osport = int(osport_txt)
+        odport = int(odport_txt)
+        nsport = int(nsport_txt)
+        ndport = int(ndport_txt)
 
-    if fwd_tuple not in TUPLES:
-        # to disambiguate 4-tuples, we'll assume that the first
-        # tuple we see has the ephemeral port as the source port
+        # print( 'adding mapping %s %s >> %s %s' % (
+        #        raw2ip(osrc), raw2ip(odst), raw2ip(nsrc), raw2ip(ndst)))
 
-        (new_src, new_dst, new_sport, new_dport) = find_new_addr(
-                src, dst, sport, dport)
+        # if the original source port is non-zero, then add a
+        # mapping for it.  Otherwise add a mapping for the wildcard
+        # source port, which will match any port (typically an
+        # ephemeral port)
+        #
+        if osport:
+            self.remappings[(osrc, odst, osport, odport)] = (
+                    nsrc, ndst, nsport, ndport)
+        else:
+            self.remappings[(osrc, odst, odport)] = (
+                    nsrc, ndst, nsport, ndport)
 
-        TUPLES[fwd_tuple] = (new_src, new_dst, new_sport, new_dport)
+        # Add a mapping for just the addresses, for ICMP
+        #
+        self.remappings[(osrc, odst)] = (nsrc, ndst, -1, -1)
 
-        bkw_tuple = (dst, src, dport, sport)
-        TUPLES[bkw_tuple] = (new_dst, new_src, new_dport, new_sport)
+    def process(self, in_file, out_file):
+        """
+        Process a single input stream, writing the results
+        to the output stream.
+        """
 
-    (sub_src, sub_dst, sub_sport, sub_dport) = TUPLES[fwd_tuple]
+        pcap_fin = dpkt.pcap.Reader(in_file)
+        pcap_fout = dpkt.pcap.Writer(out_file)
 
-    pkt_ip.src = sub_src
-    pkt_ip.dst = sub_dst
+        for timestamp, packet in pcap_fin:
+            pkt_eth = dpkt.ethernet.Ethernet(packet)
 
-    if has_ports:
-        pkt_body.sport = sub_sport
-        pkt_body.dport = sub_dport
+            new_pkt = self.rewrite_pkt(pkt_eth)
 
-    pkt_body.pack()
-    pkt_ip.pack()
-    pkt_eth.pack()
+            pcap_fout.writepkt(new_pkt, ts=timestamp)
 
-    return pkt_eth
 
-def add_mapping(orig, new):
+def parse_args(argv, rewriter):
     """
-    Add a mapping from an original address to a new address.
-
-    The format for addresses is A:B:C:D where A and B are dotted-quad
-    IPv4 addresses, and C and D are port numbers.
-
-    We don't do a lot of error checking here...
+    Parse the commandline
     """
-
-    global MAPPING
-
-    osrc_txt, odst_txt, osport_txt, odport_txt = orig.split(r':')
-    nsrc_txt, ndst_txt, nsport_txt, ndport_txt = new.split(r':')
-
-    osrc = ip2raw(osrc_txt)
-    odst = ip2raw(odst_txt)
-    nsrc = ip2raw(nsrc_txt)
-    ndst = ip2raw(ndst_txt)
-
-    osport = int(osport_txt)
-    odport = int(odport_txt)
-    nsport = int(nsport_txt)
-    ndport = int(ndport_txt)
-
-    # print( 'adding mapping %s %s >> %s %s' % (
-    #        raw2ip(osrc), raw2ip(odst), raw2ip(nsrc), raw2ip(ndst)))
-
-    # if the original source port is non-zero, then add a
-    # mapping for it.  Otherwise add a mapping for the wildcard
-    # source port, which will match any port (typically an
-    # ephemeral port)
-    #
-    if osport:
-        MAPPING[(osrc, odst, osport, odport)] = (nsrc, ndst, nsport, ndport)
-    else:
-        MAPPING[(osrc, odst, odport)] = (nsrc, ndst, nsport, ndport)
-
-    # Add a mapping for just the addresses, for ICMP
-    #
-    MAPPING[(osrc, odst)] = (nsrc, ndst, -1, -1)
-
-def parse_args(argv):
 
     parser = OptionParser()
 
-    parser.add_option('-e', dest='ephemeral_port',
-            metavar='PORT', default=MIN_EPHEM,
+    parser.add_option(
+            '-e', dest='ephemeral_port',
+            metavar='PORT', default=rewriter.MIN_EPHEM,
             type=int,
             help='First ephemeral port to use [default=%default]')
 
-    parser.add_option('-i', dest='in_fname',
+    parser.add_option(
+            '-i', dest='in_fname',
             metavar='FILENAME', default='in.pcap',
             help='Input file name [default=%default]')
 
-    parser.add_option('-o', dest='out_fname',
+    parser.add_option(
+            '-o', dest='out_fname',
             metavar='FILENAME', default='out.pcap',
             help='Output file name [default=%default]')
 
@@ -213,38 +265,32 @@ def parse_args(argv):
         orig_tuple, new_tuple = rewrite.split('/')
 
         try:
-            add_mapping(orig_tuple, new_tuple)
+            rewriter.add_mapping(orig_tuple, new_tuple)
         except BaseException as exc:
             print('bad mapping: %s' % rewrite)
             print('exc %s' % str(exc))
             return None
 
-    if ((options.ephemeral_port < MIN_EPHEM) or
-            (options.ephemeral_port >= EPHEM_RANGE)):
-        print('ERROR: ephemeral port [%d] out of range' % options.ephemeral_port)
+    if ((options.ephemeral_port < PcapAddrRewriter.MIN_EPHEM) or
+            (options.ephemeral_port >= PcapAddrRewriter.EPHEM_RANGE)):
+        print(
+                'ERROR: ephemeral port [%d] out of range' %
+                options.ephemeral_port)
         sys.exit(1)
     else:
-        global LAST_EPHEM
-
-        LAST_EPHEM = options.ephemeral_port
+        PcapAddrRewriter.last_ephem = options.ephemeral_port
 
     return options
 
-def process(in_file, out_file):
-
-    pcap_fin = dpkt.pcap.Reader(in_file)
-    pcap_fout = dpkt.pcap.Writer(out_file)
-
-    for timestamp, packet in pcap_fin:
-        pkt_eth = dpkt.ethernet.Ethernet(packet)
-
-        new_pkt = readdr_tcp(pkt_eth)
-
-        pcap_fout.writepkt(new_pkt, ts=timestamp)
 
 def main(argv):
+    """
+    Main of pcap_addr
+    """
 
-    options = parse_args(argv)
+    rewriter = PcapAddrRewriter()
+
+    options = parse_args(argv, rewriter)
     if not options:
         return 1
 
@@ -262,11 +308,10 @@ def main(argv):
         print('ERROR: %s' % str(exc))
         return 1
 
-    process(fin, fout)
+    rewriter.process(fin, fout)
 
     return 0
 
 
 if __name__ == '__main__':
     sys.exit(main(sys.argv))
-

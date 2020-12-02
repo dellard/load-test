@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+#
+# This material is funded in part by a grant from the United States
+# Department of State. The opinions, findings, and conclusions stated
+# herein are those of the authors and do not necessarily reflect
+# those of the United States Department of State.
+#
+# Copyright 2016 - Raytheon BBN Technologies Corp.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"); you
+# may not use this file except in compliance with the License.
+#
+# You may obtain a copy of the License at
+# http://www.apache.org/licenses/LICENSE-2.0.
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied. See the License for the specific language governing
+# permissions and limitations under the License.
+
+"""
+Utility to rewrite IPv4 addresses in PCAP files
+
+Unlike pcap_addr, which is a general-purpose tool for rewriting
+four-tuples, this is a much simpler tool that replaces an IPv4
+address with another IPv4 address.
+
+Note that the behavior of this program is not well-defined
+if the rewrite rules overlap, i.e. if there's a rule to change
+address X into address Y and another rule to change address Y
+into address Z, then it would be correct for X to be rewritten
+as either Y or Z.
+"""
+
+import sys
+
+from optparse import OptionParser
+
+import dpkt
+
+
+class PcapAddrRewriter:
+    """
+    An IPv4 rewriter
+    """
+
+    def __init__(self):
+        self.remappings = dict()
+
+    @staticmethod
+    def raw2ip(raw):
+        """
+        Probably fails if byte order isn't what we expect
+        """
+
+        return '.'.join(['%d' % ord(c) for c in raw])
+
+    @staticmethod
+    def ip2raw(dotted_quad):
+        """
+        Convert a dotted quad string into a 4-byte byte array
+        """
+
+        return bytes([int(c) for c in dotted_quad.split('.')])
+
+    def find_new_addr(self, addr):
+        """
+        Find the new value of the given addr
+
+        If there is no new value, then return addr itself
+        """
+
+        return self.remappings.get(addr, addr)
+
+    def rewrite_pkt(self, pkt_eth):
+        """
+        Replace the IP four-tuple of an Ethernet
+        packet, if requested.
+        """
+
+        if not hasattr(pkt_eth, 'ip'):
+            return pkt_eth
+
+        pkt_ip = pkt_eth.data
+
+        try:
+            pkt_ip.src = self.find_new_addr(pkt_ip.src)
+        except BaseException as _exc:
+            return None
+
+        try:
+            pkt_ip.dst = self.find_new_addr(pkt_ip.dst)
+        except BaseException as _exc:
+            return None
+
+        pkt_ip.pack()
+        pkt_eth.pack()
+
+        return pkt_eth
+
+    def add_mapping(self, mapping):
+        """
+        Add a mapping from an original address to a new address.
+
+        The format for mappings is A:B where A and B are dotted-quad
+        IPv4 addresses
+
+        We don't do a lot of error checking here...
+        """
+
+        old_txt, new_txt = mapping.split(r':')
+
+        old_raw = self.ip2raw(old_txt)
+        new_raw = self.ip2raw(new_txt)
+
+        self.remappings[old_raw] = new_raw
+
+    def process(self, in_file, out_file):
+        """
+        Process a single input stream, writing the results
+        to the output stream.
+        """
+
+        pcap_fin = dpkt.pcap.Reader(in_file)
+        pcap_fout = dpkt.pcap.Writer(out_file)
+
+        for timestamp, packet in pcap_fin:
+            pkt_eth = dpkt.ethernet.Ethernet(packet)
+
+            new_pkt = self.rewrite_pkt(pkt_eth)
+
+            pcap_fout.writepkt(new_pkt, ts=timestamp)
+
+
+def parse_args(argv, rewriter):
+    """
+    Parse the commandline
+    """
+
+    parser = OptionParser()
+
+    parser.add_option(
+            '-i', dest='in_fname',
+            metavar='FILENAME', default='in.pcap',
+            help='Input file name [default=%default]')
+
+    parser.add_option(
+            '-o', dest='out_fname',
+            metavar='FILENAME', default='out.pcap',
+            help='Output file name [default=%default]')
+
+    options, args = parser.parse_args(argv)
+
+    mappings = args[1:]
+
+    if not mappings:
+        print('ERROR: no addresses to rewrite?')
+        sys.exit(1)
+
+    for mapping in mappings:
+        old_ipv4, new_ipv4 = mapping.split(':')
+
+        try:
+            rewriter.add_mapping(old_ipv4, new_ipv4)
+        except BaseException as exc:
+            print('bad mapping: %s' % mapping)
+            print('exc %s' % str(exc))
+            return None
+
+    return options
+
+
+def main(argv):
+    """
+    Main of pcap_rewrite_ip
+    """
+
+    rewriter = PcapAddrRewriter()
+
+    options = parse_args(argv, rewriter)
+    if not options:
+        return 1
+
+    try:
+        fin = open(options.in_fname, 'rb')
+    except BaseException as exc:
+        print('ERROR: %s' % str(exc))
+        return 1
+
+    try:
+        fout = open(options.out_fname, 'wb+')
+    except BaseException as exc:
+        print('ERROR: %s' % str(exc))
+        return 1
+
+    rewriter.process(fin, fout)
+
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))
